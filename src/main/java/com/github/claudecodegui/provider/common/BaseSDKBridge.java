@@ -171,23 +171,38 @@ public abstract class BaseSDKBridge {
 
     /**
      * Check if the environment is ready.
+     * @deprecated Use {@link #checkEnvironmentDetailed()} for detailed error information
      */
+    @Deprecated
     public boolean checkEnvironment() {
+        return checkEnvironmentDetailed().isOk();
+    }
+
+    /**
+     * Check if the environment is ready with detailed error information.
+     */
+    public EnvironmentCheckResult checkEnvironmentDetailed() {
         try {
             String node = nodeDetector.findNodeExecutable();
             ProcessBuilder pb = new ProcessBuilder(node, "--version");
             envConfigurator.updateProcessEnvironment(pb, node);
             Process process = pb.start();
 
+            String version = null;
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String version = reader.readLine();
+                version = reader.readLine();
                 LOG.debug("Node.js version: " + version);
             }
 
             int exitCode = process.waitFor();
             if (exitCode != 0) {
-                return false;
+                return EnvironmentCheckResult.nodeNotFound(node);
+            }
+
+            // Check Node.js version
+            if (version != null && !NodeDetector.isVersionSupported(version)) {
+                return EnvironmentCheckResult.nodeVersionTooOld(version, NodeDetector.MIN_NODE_MAJOR_VERSION);
             }
 
             // Check bridge directory
@@ -195,20 +210,20 @@ public abstract class BaseSDKBridge {
             if (bridgeDir == null) {
                 // Bridge extraction is in progress (EDT thread scenario)
                 LOG.info("Bridge directory not ready yet (extraction in progress)");
-                return false;
+                return EnvironmentCheckResult.bridgeNotReady();
             }
 
             File scriptFile = new File(bridgeDir, CHANNEL_SCRIPT);
             if (!scriptFile.exists()) {
                 LOG.error("channel-manager.js not found at: " + scriptFile.getAbsolutePath());
-                return false;
+                return EnvironmentCheckResult.bridgeCoreFileMissing(scriptFile.getAbsolutePath());
             }
 
             LOG.info("Environment check passed for " + getProviderName());
-            return true;
+            return EnvironmentCheckResult.ok();
         } catch (Exception e) {
             LOG.warn("Environment check failed: " + e.getMessage());
-            return false;
+            return EnvironmentCheckResult.unknownError(e.getMessage());
         }
     }
 

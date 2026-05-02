@@ -125,29 +125,54 @@ public class WebviewInitializer {
             }
         }
 
-        if (!claudeSDKBridge.checkEnvironment()) {
-            if (sharedResolver.isExtractionInProgress()) {
-                LOG.info("[ClaudeSDKToolWindow] checkEnvironment failed but extraction in progress, showing loading panel...");
-                showLoadingPanel();
-                sharedResolver.getExtractionFuture().thenAcceptAsync(ready -> {
-                    if (ready) {
-                        reinitializeAfterExtraction();
-                    } else {
-                        invokeLaterForToolWindow(this::showErrorPanel);
+        // Check environment with detailed error information
+        com.github.claudecodegui.provider.common.EnvironmentCheckResult envCheck = claudeSDKBridge.checkEnvironmentDetailed();
+
+        if (!envCheck.isOk()) {
+            // Handle different error types
+            switch (envCheck.getStatus()) {
+                case BRIDGE_NOT_READY:
+                    // Bridge extraction in progress
+                    if (sharedResolver.isExtractionInProgress()) {
+                        LOG.info("[ClaudeSDKToolWindow] Bridge extraction in progress, showing loading panel...");
+                        showLoadingPanel();
+                        sharedResolver.getExtractionFuture().thenAcceptAsync(ready -> {
+                            if (ready) {
+                                reinitializeAfterExtraction();
+                            } else {
+                                invokeLaterForToolWindow(this::showErrorPanel);
+                            }
+                        });
+                        return;
                     }
-                });
-                return;
-            }
+                    break;
 
-            if (sharedResolver.isExtractionComplete()) {
-                LOG.info("[ClaudeSDKToolWindow] checkEnvironment failed but extraction just completed, retrying initialization with exponential backoff...");
-                retryCheckEnvironmentWithBackoff(0);
-                showLoadingPanel();
-                return;
-            }
+                case BRIDGE_CORE_FILE_MISSING:
+                case BRIDGE_NODE_MODULES_MISSING:
+                    // Bridge files missing - show specific error
+                    LOG.warn("[ClaudeSDKToolWindow] Bridge integrity error: " + envCheck.getMessage());
+                    if (sharedResolver.isExtractionComplete()) {
+                        LOG.info("[ClaudeSDKToolWindow] Extraction complete but validation failed, retrying...");
+                        retryCheckEnvironmentWithBackoff(0);
+                        showLoadingPanel();
+                        return;
+                    }
+                    showBridgeIntegrityErrorPanel(envCheck);
+                    return;
 
-            showErrorPanel();
-            return;
+                case NODE_NOT_FOUND:
+                    showErrorPanel();
+                    return;
+
+                case NODE_VERSION_TOO_OLD:
+                    // Will be handled below by nodeResult check
+                    break;
+
+                default:
+                    LOG.warn("[ClaudeSDKToolWindow] Environment check failed: " + envCheck.getMessage());
+                    showErrorPanel();
+                    return;
+            }
         }
 
         if (nodeResult == null) {
@@ -451,6 +476,23 @@ public class WebviewInitializer {
         replaceMainContent(panel);
     }
 
+    private void showBridgeIntegrityErrorPanel(com.github.claudecodegui.provider.common.EnvironmentCheckResult result) {
+        String title = "Bridge Files Missing";
+        String message = result.getMessage() + "\n\n" +
+            "This may indicate a plugin installation issue.\n\n" +
+            "Suggested solutions:\n" +
+            "1. Restart the IDE\n" +
+            "2. Reinstall the plugin\n" +
+            "3. Check if antivirus blocked the extraction";
+
+        JPanel panel = ErrorPanelBuilder.buildCenteredPanel(
+            "🔧",
+            title,
+            message + "\n\n\nDetails:\n" + result.getDetail()
+        );
+        replaceMainContent(panel);
+    }
+
     private void showLoadingPanel() {
         JPanel panel = ErrorPanelBuilder.buildLoadingPanel(
             "⏳",
@@ -508,9 +550,17 @@ public class WebviewInitializer {
             }
         }).thenRun(() -> {
             invokeLaterForToolWindow(() -> {
-                if (host.getClaudeSDKBridge().checkEnvironment()) {
+                com.github.claudecodegui.provider.common.EnvironmentCheckResult result =
+                    host.getClaudeSDKBridge().checkEnvironmentDetailed();
+
+                if (result.isOk()) {
                     LOG.info("[ClaudeSDKToolWindow] Retry attempt " + (attempt + 1) + " succeeded after extraction completion");
                     reinitializeAfterExtraction();
+                } else if (result.getStatus() == com.github.claudecodegui.provider.common.EnvironmentCheckResult.Status.BRIDGE_CORE_FILE_MISSING
+                        || result.getStatus() == com.github.claudecodegui.provider.common.EnvironmentCheckResult.Status.BRIDGE_NODE_MODULES_MISSING) {
+                    // Bridge integrity error - show specific error instead of infinite retry
+                    LOG.warn("[ClaudeSDKToolWindow] Retry attempt " + (attempt + 1) + " failed with bridge integrity error");
+                    showBridgeIntegrityErrorPanel(result);
                 } else {
                     retryCheckEnvironmentWithBackoff(attempt + 1);
                 }

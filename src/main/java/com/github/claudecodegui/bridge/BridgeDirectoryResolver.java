@@ -291,42 +291,109 @@ public class BridgeDirectoryResolver {
      * They are loaded dynamically from ~/.codemoss/dependencies/, so SDK presence is not checked here.
      */
     public boolean isValidBridgeDir(File dir) {
-        LOG.debug("[BridgeResolver] Validating bridge dir: " + (dir != null ? dir.getAbsolutePath() : "null"));
+        BridgeIntegrityResult result = validateBridgeIntegrity(dir);
+        return result.isValid();
+    }
+
+    /**
+     * Result of bridge integrity validation with detailed missing files list.
+     */
+    public static class BridgeIntegrityResult {
+        private final boolean valid;
+        private final List<String> missingFiles;
+        private final String error;
+
+        private BridgeIntegrityResult(boolean valid, List<String> missingFiles, String error) {
+            this.valid = valid;
+            this.missingFiles = missingFiles != null ? missingFiles : new ArrayList<>();
+            this.error = error;
+        }
+
+        public static BridgeIntegrityResult valid() {
+            return new BridgeIntegrityResult(true, new ArrayList<>(), null);
+        }
+
+        public static BridgeIntegrityResult invalid(List<String> missingFiles) {
+            return new BridgeIntegrityResult(false, missingFiles,
+                "Missing " + missingFiles.size() + " critical file(s): " + String.join(", ", missingFiles));
+        }
+
+        public static BridgeIntegrityResult error(String error) {
+            return new BridgeIntegrityResult(false, new ArrayList<>(), error);
+        }
+
+        public boolean isValid() {
+            return valid;
+        }
+
+        public List<String> getMissingFiles() {
+            return missingFiles;
+        }
+
+        public String getError() {
+            return error;
+        }
+
+        @Override
+        public String toString() {
+            if (valid) {
+                return "BridgeIntegrityResult[VALID]";
+            }
+            return "BridgeIntegrityResult[INVALID: " + error + "]";
+        }
+    }
+
+    /**
+     * Validate bridge directory integrity with detailed missing files information.
+     * This is a more thorough version of isValidBridgeDir() that returns specific
+     * information about what's missing.
+     *
+     * @param dir The bridge directory to validate
+     * @return BridgeIntegrityResult with validation details
+     */
+    public BridgeIntegrityResult validateBridgeIntegrity(File dir) {
+        LOG.debug("[BridgeResolver] Validating bridge integrity: " + (dir != null ? dir.getAbsolutePath() : "null"));
+
         if (dir == null) {
-            LOG.debug("[BridgeResolver] Validation failed: dir is null");
-            return false;
+            return BridgeIntegrityResult.error("Directory is null");
         }
         if (!dir.exists()) {
-            LOG.debug("[BridgeResolver] Validation failed: dir does not exist");
-            return false;
+            return BridgeIntegrityResult.error("Directory does not exist: " + dir.getAbsolutePath());
         }
         if (!dir.isDirectory()) {
-            LOG.debug("[BridgeResolver] Validation failed: dir is not a directory");
-            return false;
+            return BridgeIntegrityResult.error("Path is not a directory: " + dir.getAbsolutePath());
         }
 
-        // Check for the core script
-        File scriptFile = new File(dir, NODE_SCRIPT);
-        LOG.debug("[BridgeResolver] Checking for core script: " + scriptFile.getAbsolutePath());
-        if (!scriptFile.exists()) {
-            LOG.debug("[BridgeResolver] Validation failed: Core script not found: " + scriptFile.getAbsolutePath());
-            return false;
-        }
-        LOG.debug("[BridgeResolver] Core script found");
+        List<String> missingFiles = new ArrayList<>();
 
-        // Check that node_modules exists (contains bridge-layer dependencies like sql.js)
+        // Check for critical files
+        String[] criticalFiles = {
+            NODE_SCRIPT,           // channel-manager.js
+            "package.json",        // npm package manifest
+            "package-lock.json"    // npm lock file
+        };
+
+        for (String fileName : criticalFiles) {
+            File file = new File(dir, fileName);
+            if (!file.exists()) {
+                missingFiles.add(fileName);
+                LOG.warn("[BridgeResolver] Critical file missing: " + file.getAbsolutePath());
+            }
+        }
+
+        // Check for node_modules directory
         File nodeModules = new File(dir, "node_modules");
-        LOG.debug("[BridgeResolver] Checking for node_modules: " + nodeModules.getAbsolutePath());
         if (!nodeModules.exists() || !nodeModules.isDirectory()) {
-            LOG.debug("[BridgeResolver] Validation failed: node_modules not found or not a directory");
-            return false;
+            missingFiles.add("node_modules/");
+            LOG.warn("[BridgeResolver] node_modules missing or not a directory: " + nodeModules.getAbsolutePath());
         }
-        LOG.debug("[BridgeResolver] node_modules found");
 
-        // AI SDKs (@anthropic-ai/claude-agent-sdk, @openai/codex-sdk, etc.)
-        // are loaded dynamically from ~/.codemoss/dependencies/, no need to check within ai-bridge
+        if (!missingFiles.isEmpty()) {
+            return BridgeIntegrityResult.invalid(missingFiles);
+        }
 
-        return true;
+        LOG.debug("[BridgeResolver] Bridge integrity validation passed");
+        return BridgeIntegrityResult.valid();
     }
 
     private void addCandidate(List<File> possibleDirs, File dir) {
@@ -635,7 +702,8 @@ public class BridgeDirectoryResolver {
     private File waitForValidBridgeDir(File dir, int maxRetries, int initialDelayMs) {
         int delayMs = initialDelayMs;
         for (int i = 0; i <= maxRetries; i++) {
-            if (isValidBridgeDir(dir)) {
+            BridgeIntegrityResult result = validateBridgeIntegrity(dir);
+            if (result.isValid()) {
                 if (i > 0) {
                     LOG.info("[BridgeResolver] Bridge validation succeeded after " + i + " retries");
                 }
@@ -653,7 +721,9 @@ public class BridgeDirectoryResolver {
                 delayMs *= 2; // Exponential backoff
             }
         }
-        LOG.warn("[BridgeResolver] Bridge validation failed after " + (maxRetries + 1) + " attempts");
+        // Log final validation failure with details
+        BridgeIntegrityResult finalResult = validateBridgeIntegrity(dir);
+        LOG.error("[BridgeResolver] Bridge validation failed after " + (maxRetries + 1) + " attempts: " + finalResult.getError());
         return null;
     }
 
